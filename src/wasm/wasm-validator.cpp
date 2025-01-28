@@ -4082,10 +4082,10 @@ static void validateTables(Module& module, ValidationInfo& info) {
     info.shouldBeTrue(table->initial <= table->max,
                       "table",
                       "size minimum must not be greater than maximum");
-    info.shouldBeTrue(
+    /*info.shouldBeTrue(
       table->type.isNullable(),
       "table",
-      "Non-nullable reference types are not yet supported for tables");
+      "Non-nullable reference types are not yet supported for tables");*/
     auto typeFeats = table->type.getFeatures();
     if (!info.shouldBeTrue(table->type == funcref ||
                              typeFeats <= module.features,
@@ -4105,10 +4105,10 @@ static void validateTables(Module& module, ValidationInfo& info) {
     info.shouldBeTrue(segment->type.isRef(),
                       "elem",
                       "element segment type must be of reference type.");
-    info.shouldBeTrue(
+    /*info.shouldBeTrue(
       segment->type.isNullable(),
       "elem",
-      "Non-nullable reference types are not yet supported for tables");
+      "Non-nullable reference types are not yet supported for tables");*/
     auto typeFeats = segment->type.getFeatures();
     if (!info.shouldBeTrue(
           segment->type == funcref || typeFeats <= module.features,

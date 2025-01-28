@@ -33,6 +33,7 @@ Pass* createCodePushingPass();
 Pass* createConstHoistingPass();
 Pass* createConstantFieldPropagationPass();
 Pass* createConstantFieldPropagationRefTestPass();
+Pass* createConstructInterpreterTablesPass();
 Pass* createDAEPass();
 Pass* createDAEOptimizingPass();
 Pass* createDataFlowOptsPass();

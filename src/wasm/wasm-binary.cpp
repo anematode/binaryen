@@ -748,12 +748,19 @@ void WasmBinaryWriter::writeTableDeclarations() {
   auto num = importInfo->getNumDefinedTables();
   o << U32LEB(num);
   ModuleUtils::iterDefinedTables(*wasm, [&](Table* table) {
+    if (table->initExpression) {
+      o << int8_t(0x40) << int8_t(0x00);
+    }
     writeType(table->type);
     writeResizableLimits(table->initial,
                          table->max,
                          table->hasMax(),
                          /*shared=*/false,
                          table->is64());
+    if (table->initExpression) {
+      writeExpression(table->initExpression);
+      o << int8_t(BinaryConsts::End);
+    }
   });
   finishSection(start);
 }

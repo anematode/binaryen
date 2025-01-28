@@ -24,6 +24,7 @@ set(passes_SOURCES
   CodePushing.cpp
   CodeFolding.cpp
   ConstantFieldPropagation.cpp
+  ConstructInterpreterTables.cc
   ConstHoisting.cpp
   DataFlowOpts.cpp
   DeadArgumentElimination.cpp

@@ -194,6 +194,8 @@ void PassRegistry::registerPasses() {
     "gsi", "globally optimize struct values", createGlobalStructInferencePass);
   registerPass(
     "gto", "globally optimize GC types", createGlobalTypeOptimizationPass);
+  registerPass(
+    "interpreter", "process bjvm interpreter intrinsics", createConstructInterpreterTablesPass);
   registerPass("gufa",
                "Grand Unified Flow Analysis: optimize the entire program using "
                "information about what content can actually appear in each "
