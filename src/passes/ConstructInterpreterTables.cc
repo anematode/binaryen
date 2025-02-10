@@ -129,17 +129,21 @@ struct ConstructInterpreterTables : public Pass {
 
     resolve_exprs(base, module->elementSegments[0]->data);
 
-    // Ok, now construct four typed function reference tables
+    // Now interleave all of double_resolved, int_resolved, float_resolved into void_resolved,
+    // in that order (reversed below since we're inserting 1 by 1)
+    for (int i = 0; i < base.max_insn; ++i) {
+      base.void_resolved.insert(base.void_resolved.begin() + i * 4 + 1,
+        { base.double_resolved[i], base.int_resolved[i], base.float_resolved[i] });
+    }
+
+    // Ok, now construct four typed function reference tables, joined into one
     Builder builder(*module);
 
     // Use the types of nop_impl_void, nop_impl_double, nop_impl_int, nop_impl_float
 
     Function *void_tmpl = module->getFunction("nop_impl_void");
-    Function *double_tmpl = module->getFunction("nop_impl_double");
-    Function *int_tmpl = module->getFunction("nop_impl_int");
-    Function *float_tmpl = module->getFunction("nop_impl_float");
 
-    if (!void_tmpl || !double_tmpl || !int_tmpl || !float_tmpl) {
+    if (!void_tmpl) {
       Fatal() << "Missing one of the nop_impl functions";
     }
 
@@ -147,13 +151,13 @@ struct ConstructInterpreterTables : public Pass {
       Name tbl_name = name;
       std::unique_ptr<Table> tbl = builder.makeTable(
       tbl_name, Type(tmpl->type, NonNullable),
-      base.max_insn, base.max_insn, Type::i32, resolved[0]);
+      base.max_insn * 4, base.max_insn * 4, Type::i32, resolved[0]);
 
       std::unique_ptr<ElementSegment> seg = builder.makeElementSegment(
         Names::getValidElementSegmentName(*module, Name::fromInt(0)),
         tbl->name, builder.makeConst(int32_t(0)), Type(tmpl->type, NonNullable));
 
-      for (int i = 0; i < base.max_insn; i++) {
+      for (int i = 0; i < base.max_insn * 4; i++) {
         Expression *expr = resolved.at(i);
         if (expr) {
           seg->data.push_back(expr);
@@ -169,73 +173,109 @@ struct ConstructInterpreterTables : public Pass {
     };
 
     Name void_tbl = make_tbl("__interpreter_void_table", void_tmpl, base.void_resolved);
-    Name double_tbl = make_tbl("__interpreter_double_table", double_tmpl, base.double_resolved);
-    Name int_tbl = make_tbl("__interpreter_int_table", int_tmpl, base.int_resolved);
-    Name float_tbl = make_tbl("__interpreter_float_table", float_tmpl, base.float_resolved);
 
     auto* runner = getPassRunner();
 
     struct RewriteCalls : WalkerPass<PostWalker<RewriteCalls>> {
       const Name& void_tbl;
-     const Name& double_tbl;
-     const Name& int_tbl;
-     const Name& float_tbl;
-     Function* void_tmpl;
-     Function* double_tmpl;
-     Function* int_tmpl;
-     Function* float_tmpl;
+      Function* void_tmpl;
+      int max_insn;
+
+      std::array<Name, 5> intrinsics;
 
       RewriteCalls(const Name& void_tbl,
-                   const Name& double_tbl,
-                   const Name& int_tbl,
-                   const Name& float_tbl,
                    Function* void_tmpl,
-                   Function* double_tmpl,
-                   Function* int_tmpl,
-                   Function* float_tmpl) : void_tbl(void_tbl),
-                                            double_tbl(double_tbl),
-                                            int_tbl(int_tbl),
-                                            float_tbl(float_tbl),
-                                            void_tmpl(void_tmpl),
-                                            double_tmpl(double_tmpl),
-                                            int_tmpl(int_tmpl),
-                                            float_tmpl(float_tmpl) {}
+                   int max_insn,
+                   Importable* intrinsic_next_void,
+                    Importable* intrinsic_next_double,
+                    Importable* intrinsic_next_int,
+                    Importable* intrinsic_next_float,
+                    Importable* intrinsic_next_polymorphic
+                   ) : void_tbl(void_tbl),
+                                            void_tmpl(void_tmpl), max_insn(max_insn) {
+        intrinsics[0] = intrinsic_next_void->name;
+        intrinsics[1] = intrinsic_next_double->name;
+        intrinsics[2] = intrinsic_next_int->name;
+        intrinsics[3] = intrinsic_next_float->name;
+        intrinsics[4] = intrinsic_next_polymorphic->name;
+      }
+      void visitReturn(Return* return_) {
+        // If the contents are a return_call_indirect due to a visitCall pass,
+        // replace it with the contents.
+        if (return_->value && return_->value->is<CallIndirect>()) {
+          CallIndirect *c = return_->value->cast<CallIndirect>();
+          if (c->table == void_tbl && c->isReturn) {
+            replaceCurrent(return_->value);
+          }
+        }
+      }
+
       void visitCall(Call* call) {
-        bool is_void = call->target == "__interpreter_intrinsic_next_void";
-        bool is_double = call->target == "__interpreter_intrinsic_next_double";
-        bool is_int = call->target == "__interpreter_intrinsic_next_int";
-        bool is_float = call->target == "__interpreter_intrinsic_next_float";
-        if (!is_void && !is_double && !is_int && !is_float) {
+        // Skip when in functions not containing "_impl_" in their name
+
+        size_t index = std::find(intrinsics.begin(), intrinsics.end(), call->target) - intrinsics.begin();
+        if (index == intrinsics.size()) { // not found
           return;
         }
 
-        Expression* index = call->operands[call->operands.size() - 1];
-        call->operands.pop_back();
+        bool polymorphic = index == 4;
 
-        Name table = is_void     ? void_tbl
-                     : is_double ? double_tbl
-                     : is_int    ? int_tbl
-                                 : float_tbl;
-        HeapType type = is_void     ? void_tmpl->type
-                        : is_double ? double_tmpl->type
-                        : is_int    ? int_tmpl->type
-                                    : float_tmpl->type;
+        // Two cases. In polymorphic case, compute the next instruction * 4 + instruction.tos_before. In
+        // non-polymorphic case, add the known TOS.
+        Expression* inst_pointer = call->operands[2];
 
         Builder builder(*getModule());
-        // Check if current function contains "_impl_" and skip
 
-        bool make_return = call->isReturn || getFunction()->name.str.find("_impl_") != std::string::npos;
+        // Tee to a local so that we don't recompute it (could have side effects).
+        Index inst_local = builder.addVar(getFunction(), Type::BasicType::i32);
+        int offsetof_kind = 0;
+        int offsetof_tos_before = 2;
+
+        call->operands[2] = builder.makeLocalTee(inst_local, inst_pointer, Type::BasicType::i32);
+
+        Expression *get_inst = builder.makeLocalGet(inst_local, Type::BasicType::i32);
+
+
+        auto memory = getModule()->memories[0]->name;
+        Expression* kind = builder.makeLoad(1, false, offsetof_kind, 1,
+          get_inst, Type::BasicType::i32, memory);
+
+        Expression* tos_before = polymorphic ?
+          (Expression*)builder.makeLoad(1, false, offsetof_tos_before, 1,
+            get_inst, Type::BasicType::i32, memory) :
+          (Expression*)builder.makeConst(Literal((int)index));
+
+        // kind * 4 + tos_before
+        Expression* indirect_index = builder.makeBinary(AddInt32, tos_before,
+          builder.makeBinary(MulInt32, kind, builder.makeConst(Literal(4))));
+
+        Name table = void_tbl;
+        HeapType type = void_tmpl->type;
+
+        bool make_return = getFunction()->name.str.find("_impl") != std::string::npos;
         replaceCurrent(builder.makeCallIndirect(
-          table, index, call->operands, type, make_return /* return */));
+          table, indirect_index, call->operands, type, make_return));
       }
     };
 
-    RewriteCalls(void_tbl, double_tbl, int_tbl, float_tbl, void_tmpl, double_tmpl, int_tmpl, float_tmpl).run(runner, module);
+    int max_insn = base.max_insn;
+    Importable* intrinsic_next_void = module->getFunction("__interpreter_intrinsic_next_void");
+    Importable* intrinsic_next_double = module->getFunction("__interpreter_intrinsic_next_double");
+    Importable* intrinsic_next_float = module->getFunction("__interpreter_intrinsic_next_float");
+    Importable* intrinsic_next_int = module->getFunction("__interpreter_intrinsic_next_int");
+    Importable* intrinsic_next_polymorphic = module->getFunction("__interpreter_intrinsic_next_polymorphic");
 
-    module->removeFunction("__interpreter_intrinsic_next_void");
-    module->removeFunction("__interpreter_intrinsic_next_double");
-    module->removeFunction("__interpreter_intrinsic_next_int");
-    module->removeFunction("__interpreter_intrinsic_next_float");
+    RewriteCalls(void_tbl, void_tmpl, max_insn, intrinsic_next_void,
+      intrinsic_next_double, intrinsic_next_int, intrinsic_next_float,
+      intrinsic_next_polymorphic).run(runner, module);
+
+    for (int i = 0; i < (int)module->functions.size(); ++i) {
+      auto &fn = module->functions[i];
+      if (fn->base.startsWith("__interpreter_intrinsic")) {
+        module->removeFunction(fn->name);
+        --i;
+      }
+    }
   }
 };
 
