@@ -182,6 +182,7 @@ struct ConstructInterpreterTables : public Pass {
       int max_insn;
 
       std::array<Name, 5> intrinsics;
+      Importable *notco_call;
 
       RewriteCalls(const Name& void_tbl,
                    Function* void_tmpl,
@@ -190,7 +191,8 @@ struct ConstructInterpreterTables : public Pass {
                     Importable* intrinsic_next_double,
                     Importable* intrinsic_next_int,
                     Importable* intrinsic_next_float,
-                    Importable* intrinsic_next_polymorphic
+                    Importable* intrinsic_next_polymorphic,
+                    Importable* intrinsic_notco_call
                    ) : void_tbl(void_tbl),
                                             void_tmpl(void_tmpl), max_insn(max_insn) {
         intrinsics[0] = intrinsic_next_void->name;
@@ -198,6 +200,7 @@ struct ConstructInterpreterTables : public Pass {
         intrinsics[2] = intrinsic_next_int->name;
         intrinsics[3] = intrinsic_next_float->name;
         intrinsics[4] = intrinsic_next_polymorphic->name;
+        notco_call = intrinsic_notco_call;
       }
       void visitReturn(Return* return_) {
         // If the contents are a return_call_indirect due to a visitCall pass,
@@ -214,6 +217,18 @@ struct ConstructInterpreterTables : public Pass {
         // Skip when in functions not containing "_impl_" in their name
 
         size_t index = std::find(intrinsics.begin(), intrinsics.end(), call->target) - intrinsics.begin();
+        Builder builder(*getModule());
+
+        Name table = void_tbl;
+        HeapType type = void_tmpl->type;
+
+        if (notco_call->name == call->target) {
+          Expression* indirect_index = call->operands.pop_back();
+          replaceCurrent(builder.makeCallIndirect(
+            table, indirect_index, call->operands, type, false));
+          return;
+        }
+
         if (index == intrinsics.size()) { // not found
           return;
         }
@@ -224,8 +239,6 @@ struct ConstructInterpreterTables : public Pass {
         // non-polymorphic case, add the known TOS.
         Expression* inst_pointer = call->operands[2];
 
-        Builder builder(*getModule());
-
         // Tee to a local so that we don't recompute it (could have side effects).
         Index inst_local = builder.addVar(getFunction(), Type::BasicType::i32);
         int offsetof_kind = 0;
@@ -234,7 +247,6 @@ struct ConstructInterpreterTables : public Pass {
         call->operands[2] = builder.makeLocalTee(inst_local, inst_pointer, Type::BasicType::i32);
 
         Expression *get_inst = builder.makeLocalGet(inst_local, Type::BasicType::i32);
-
 
         auto memory = getModule()->memories[0]->name;
         Expression* kind = builder.makeLoad(1, false, offsetof_kind, 1,
@@ -249,9 +261,6 @@ struct ConstructInterpreterTables : public Pass {
         Expression* indirect_index = builder.makeBinary(AddInt32, tos_before,
           builder.makeBinary(MulInt32, kind, builder.makeConst(Literal(4))));
 
-        Name table = void_tbl;
-        HeapType type = void_tmpl->type;
-
         bool make_return = getFunction()->name.str.find("_impl") != std::string::npos;
         replaceCurrent(builder.makeCallIndirect(
           table, indirect_index, call->operands, type, make_return));
@@ -259,15 +268,16 @@ struct ConstructInterpreterTables : public Pass {
     };
 
     int max_insn = base.max_insn;
-    Importable* intrinsic_next_void = module->getFunction("__interpreter_intrinsic_next_void");
-    Importable* intrinsic_next_double = module->getFunction("__interpreter_intrinsic_next_double");
-    Importable* intrinsic_next_float = module->getFunction("__interpreter_intrinsic_next_float");
-    Importable* intrinsic_next_int = module->getFunction("__interpreter_intrinsic_next_int");
-    Importable* intrinsic_next_polymorphic = module->getFunction("__interpreter_intrinsic_next_polymorphic");
+    Importable* intrinsic_next_void = module->getFunctionOrNull("__interpreter_intrinsic_next_void");
+    Importable* intrinsic_next_double = module->getFunctionOrNull("__interpreter_intrinsic_next_double");
+    Importable* intrinsic_next_float = module->getFunctionOrNull("__interpreter_intrinsic_next_float");
+    Importable* intrinsic_next_int = module->getFunctionOrNull("__interpreter_intrinsic_next_int");
+    Importable* intrinsic_next_polymorphic = module->getFunctionOrNull("__interpreter_intrinsic_next_polymorphic");
+    Importable* intrinsic_notco_call = module->getFunctionOrNull("__interpreter_intrinsic_notco_call_outlined");
 
     RewriteCalls(void_tbl, void_tmpl, max_insn, intrinsic_next_void,
       intrinsic_next_double, intrinsic_next_int, intrinsic_next_float,
-      intrinsic_next_polymorphic).run(runner, module);
+      intrinsic_next_polymorphic, intrinsic_notco_call).run(runner, module);
 
     for (int i = 0; i < (int)module->functions.size(); ++i) {
       auto &fn = module->functions[i];
